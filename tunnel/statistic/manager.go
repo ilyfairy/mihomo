@@ -22,6 +22,9 @@ func init() {
 		uploadTotal:   atomic.NewInt64(0),
 		downloadTotal: atomic.NewInt64(0),
 		process:       &process.Process{Pid: int32(os.Getpid())},
+
+		joinSubscribers:  xsync.NewMapOf[string, func(Tracker) error](),
+		leaveSubscribers: xsync.NewMapOf[string, func(Tracker) error](),
 	}
 
 	go DefaultManager.handle()
@@ -37,14 +40,58 @@ type Manager struct {
 	downloadTotal atomic.Int64
 	process       *process.Process
 	memory        uint64
+
+	joinSubscribers  *xsync.MapOf[string, func(Tracker) error] // 存储Join事件的订阅者
+	leaveSubscribers *xsync.MapOf[string, func(Tracker) error] // 存储Leave事件的订阅者
 }
 
+// 新连接
 func (m *Manager) Join(c Tracker) {
 	m.connections.Store(c.ID(), c)
+	m.NotifyJoinSubscribers(c)
 }
 
+// 断开连接
 func (m *Manager) Leave(c Tracker) {
-	m.connections.Delete(c.ID())
+	if _, ok := m.connections.LoadAndDelete(c.ID()); ok {
+		m.NotifyLeaveSubscribers(c)
+	}
+}
+
+// 订阅Join事件
+func (m *Manager) SubscribeJoin(key string, subscriber func(Tracker) error) {
+	m.joinSubscribers.Store(key, subscriber)
+}
+
+// 移除Join事件的订阅者
+func (m *Manager) UnsubscribeJoin(key string) {
+	m.joinSubscribers.Delete(key)
+}
+
+// 通知Join事件的订阅者
+func (m *Manager) NotifyJoinSubscribers(c Tracker) {
+	m.joinSubscribers.Range(func(key string, subscriber func(Tracker) error) bool {
+		_ = subscriber(c)
+		return true
+	})
+}
+
+// 订阅Leave事件
+func (m *Manager) SubscribeLeave(key string, subscriber func(Tracker) error) {
+	m.leaveSubscribers.Store(key, subscriber)
+}
+
+// 移除Leave事件的订阅者
+func (m *Manager) UnsubscribeLeave(key string) {
+	m.leaveSubscribers.Delete(key)
+}
+
+// 通知Leave事件的订阅者
+func (m *Manager) NotifyLeaveSubscribers(c Tracker) {
+	m.leaveSubscribers.Range(func(key string, subscriber func(Tracker) error) bool {
+		_ = subscriber(c)
+		return true
+	})
 }
 
 func (m *Manager) Get(id string) (c Tracker) {
