@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
-	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/tunnel/statistic"
 
 	"github.com/go-chi/chi/v5"
@@ -86,53 +84,76 @@ func watchConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var mu sync.Mutex
-	buf := &bytes.Buffer{}
+	joinBuf := &bytes.Buffer{}
+	leaveBuf := &bytes.Buffer{}
 
-	sendJoinConnection := func(c statistic.Tracker) error {
-		mu.Lock()
-		defer mu.Unlock()
+	joinSub := statistic.DefaultManager.SubscribeJoin()
+	defer statistic.DefaultManager.UnsubscribeJoin(joinSub)
+	leaveSub := statistic.DefaultManager.SubscribeLeave()
+	defer statistic.DefaultManager.UnsubscribeLeave(leaveSub)
 
-		watchItem := ConnectionWatchItem{
-			Type:       "new",
-			Connection: c,
+	joinCh := make(chan statistic.Tracker, 1024)
+	leaveCh := make(chan statistic.Tracker, 1024)
+
+	go func() {
+		for tracker := range joinSub {
+			select {
+			case joinCh <- tracker:
+			default:
+			}
 		}
+		close(joinCh)
+	}()
 
-		buf.Reset()
-		if err := json.NewEncoder(buf).Encode(watchItem); err != nil {
-			return err
+	go func() {
+		for tracker := range leaveSub {
+			select {
+			case leaveCh <- tracker:
+			default:
+			}
 		}
+		close(leaveCh)
+	}()
 
-		if err := wsutil.WriteMessage(conn, ws.StateServerSide, ws.OpText, buf.Bytes()); err != nil {
-			return err
+	go func() {
+		for track := range joinCh {
+			watchItem := ConnectionWatchItem{
+				Type:       "new",
+				Connection: track,
+			}
+
+			joinBuf.Reset()
+			if err := json.NewEncoder(joinBuf).Encode(watchItem); err != nil {
+				conn.Close()
+				break
+			}
+
+			if err := wsutil.WriteMessage(conn, ws.StateServerSide, ws.OpText, joinBuf.Bytes()); err != nil {
+				conn.Close()
+				break
+			}
 		}
-		return nil
-	}
-	sendLeaveConnection := func(c statistic.Tracker) error {
-		mu.Lock()
-		defer mu.Unlock()
+	}()
 
-		watchItem := ConnectionWatchItem{
-			Type:       "close",
-			Connection: c,
+	go func() {
+		for track := range leaveCh {
+			watchItem := ConnectionWatchItem{
+				Type:       "close",
+				Connection: track,
+			}
+
+			leaveBuf.Reset()
+			if err := json.NewEncoder(leaveBuf).Encode(watchItem); err != nil {
+				conn.Close()
+				break
+			}
+
+			if err := wsutil.WriteMessage(conn, ws.StateServerSide, ws.OpText, leaveBuf.Bytes()); err != nil {
+				conn.Close()
+				break
+			}
 		}
-
-		buf.Reset()
-		if err := json.NewEncoder(buf).Encode(watchItem); err != nil {
-			return err
-		}
-
-		if err := wsutil.WriteMessage(conn, ws.StateServerSide, ws.OpText, buf.Bytes()); err != nil {
-			return err
-		}
-		return nil
-	}
-
-	substrubtionId := utils.NewUUIDV7().String()
-	statistic.DefaultManager.SubscribeJoin(substrubtionId, sendJoinConnection)
-	defer statistic.DefaultManager.UnsubscribeJoin(substrubtionId)
-	statistic.DefaultManager.SubscribeLeave(substrubtionId, sendLeaveConnection)
-	defer statistic.DefaultManager.UnsubscribeLeave(substrubtionId)
+	}()
 
 	// 阻塞等待连接关闭
 	readBuf := make([]byte, 1024)
@@ -141,7 +162,6 @@ func watchConnections(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	print("连接关闭")
 }
 
 func closeConnection(w http.ResponseWriter, r *http.Request) {

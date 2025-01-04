@@ -6,6 +6,7 @@ import (
 
 	"github.com/metacubex/mihomo/common/atomic"
 
+	"github.com/metacubex/mihomo/common/observable"
 	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/shirou/gopsutil/v4/process"
 )
@@ -23,9 +24,11 @@ func init() {
 		downloadTotal: atomic.NewInt64(0),
 		process:       &process.Process{Pid: int32(os.Getpid())},
 
-		joinSubscribers:  xsync.NewMapOf[string, func(Tracker) error](),
-		leaveSubscribers: xsync.NewMapOf[string, func(Tracker) error](),
+		joinCh:  make(chan Tracker),
+		leaveCh: make(chan Tracker),
 	}
+	DefaultManager.joinObservable = observable.NewObservable[Tracker](DefaultManager.joinCh)
+	DefaultManager.leaveObservable = observable.NewObservable[Tracker](DefaultManager.leaveCh)
 
 	go DefaultManager.handle()
 }
@@ -41,57 +44,45 @@ type Manager struct {
 	process       *process.Process
 	memory        uint64
 
-	joinSubscribers  *xsync.MapOf[string, func(Tracker) error] // 存储Join事件的订阅者
-	leaveSubscribers *xsync.MapOf[string, func(Tracker) error] // 存储Leave事件的订阅者
+	joinCh          chan Tracker
+	joinObservable  *observable.Observable[Tracker]
+	leaveCh         chan Tracker
+	leaveObservable *observable.Observable[Tracker]
 }
 
 // 新连接
 func (m *Manager) Join(c Tracker) {
 	m.connections.Store(c.ID(), c)
-	m.NotifyJoinSubscribers(c)
+	m.joinCh <- c
 }
 
 // 断开连接
 func (m *Manager) Leave(c Tracker) {
 	if _, ok := m.connections.LoadAndDelete(c.ID()); ok {
-		m.NotifyLeaveSubscribers(c)
+		m.leaveCh <- c
 	}
 }
 
 // 订阅Join事件
-func (m *Manager) SubscribeJoin(key string, subscriber func(Tracker) error) {
-	m.joinSubscribers.Store(key, subscriber)
+func (m *Manager) SubscribeJoin() observable.Subscription[Tracker] {
+	sub, _ := m.joinObservable.Subscribe()
+	return sub
 }
 
 // 移除Join事件的订阅者
-func (m *Manager) UnsubscribeJoin(key string) {
-	m.joinSubscribers.Delete(key)
-}
-
-// 通知Join事件的订阅者
-func (m *Manager) NotifyJoinSubscribers(c Tracker) {
-	m.joinSubscribers.Range(func(key string, subscriber func(Tracker) error) bool {
-		_ = subscriber(c)
-		return true
-	})
+func (m *Manager) UnsubscribeJoin(sub observable.Subscription[Tracker]) {
+	m.joinObservable.UnSubscribe(sub)
 }
 
 // 订阅Leave事件
-func (m *Manager) SubscribeLeave(key string, subscriber func(Tracker) error) {
-	m.leaveSubscribers.Store(key, subscriber)
+func (m *Manager) SubscribeLeave() observable.Subscription[Tracker] {
+	sub, _ := m.leaveObservable.Subscribe()
+	return sub
 }
 
 // 移除Leave事件的订阅者
-func (m *Manager) UnsubscribeLeave(key string) {
-	m.leaveSubscribers.Delete(key)
-}
-
-// 通知Leave事件的订阅者
-func (m *Manager) NotifyLeaveSubscribers(c Tracker) {
-	m.leaveSubscribers.Range(func(key string, subscriber func(Tracker) error) bool {
-		_ = subscriber(c)
-		return true
-	})
+func (m *Manager) UnsubscribeLeave(sub observable.Subscription[Tracker]) {
+	m.leaveObservable.UnSubscribe(sub)
 }
 
 func (m *Manager) Get(id string) (c Tracker) {
