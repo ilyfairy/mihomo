@@ -424,8 +424,9 @@ func memory(w http.ResponseWriter, r *http.Request) {
 }
 
 type Log struct {
-	Type    string `json:"type"`
-	Payload string `json:"payload"`
+	Type    string    `json:"type"`
+	Payload string    `json:"payload"`
+	Time    time.Time `json:"time"`
 }
 type LogStructuredField struct {
 	Key   string `json:"key"`
@@ -496,6 +497,7 @@ func getLogs(w http.ResponseWriter, r *http.Request) {
 			if err := json.NewEncoder(buf).Encode(Log{
 				Type:    logM.Type(),
 				Payload: logM.Payload,
+				Time:    time.Now(),
 			}); err != nil {
 				break
 			}
